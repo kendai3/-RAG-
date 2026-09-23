@@ -1,0 +1,12 @@
+fastapi==0.141.1
+uvicorn==0.52.4
+ollama==0.6.2
+chromadb==1.5.9
+langchain-text-splitters==1.1.2
+pymupdf4llm==1.28.2
+requests==2.34.2
+python-multipart==0.0.32
+pydantic==2.13.5
+
+# 如需支持 .docx / .doc 转换，取消下面这行的注释（依赖较重，首次安装较慢）
+# docling

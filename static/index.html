@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <title>本地知识库问答</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { max-width: 780px; margin: 30px auto; font-family: "Microsoft YaHei", sans-serif; background: #f5f5f5; color: #111; }
+    h2 { text-align: center; }
+    .card { background: #fff; padding: 16px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+    #env { display: none; margin-bottom: 12px; padding: 10px 14px; border-radius: 8px; font-size: 14px;
+           background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+    #upload-area { margin-bottom: 16px; }
+    #progress { font-size: 14px; margin-top: 10px; color: #4b5563; min-height: 20px; }
+    #progress.ok { color: #15803d; }
+    #progress.err { color: #b91c1c; }
+    #chat { height: 440px; overflow-y: auto; margin-bottom: 12px; }
+    #chat .hint { color: #9ca3af; }
+    .q { color: #2563eb; margin: 14px 0 4px; font-weight: 600; white-space: pre-wrap; }
+    .a { color: #111; white-space: pre-wrap; margin: 0 0 4px; line-height: 1.65; }
+    .a.err { color: #b91c1c; }
+    .a .caret { display: inline-block; width: 7px; height: 15px; background: #2563eb;
+                vertical-align: -2px; animation: blink 1s steps(1) infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+    .refs { color: #6b7280; font-size: 12px; margin: 0 0 8px; }
+    .stat { color: #9ca3af; font-size: 12px; margin: 0 0 12px; }
+    #input-row { display: flex; gap: 8px; }
+    #question { flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 15px; }
+    #question:disabled { background: #f9fafb; }
+    button { padding: 10px 20px; border: none; border-radius: 6px; background: #2563eb; color: #fff;
+             cursor: pointer; font-size: 15px; white-space: nowrap; }
+    button:disabled { background: #aaa; cursor: not-allowed; }
+    button.ghost { background: #e5e7eb; color: #374151; }
+  </style>
+</head>
+<body>
+  <h2>📖 本地知识库问答</h2>
+
+  <div id="env"></div>
+
+  <div id="upload-area" class="card">
+    <input type="file" id="file" accept=".pdf,.md,.docx,.txt">
+    <button id="uploadBtn" onclick="uploadFile()">上传并处理</button>
+    <div id="progress"></div>
+  </div>
+
+  <div id="chat" class="card"><p class="hint">请先上传文档</p></div>
+
+  <div id="input-row">
+    <input id="question" placeholder="输入问题，回车发送" disabled
+           onkeydown="if(event.key==='Enter')send()">
+    <button id="sendBtn" onclick="send()" disabled>发送</button>
+    <button class="ghost" onclick="clearChat()">清空</button>
+  </div>
+
+  <script>
+    let currentFile = null;      // 当前文档 id
+    let history = [];            // [{q, a}] 交给后端拼多轮
+    let busy = false;            // 是否正在生成
+    let aborter = null;          // 用于"停止"
+
+    // ---------- 环境自检（旧版页面漏调了这个接口）----------
+    (async () => {
+      try {
+        const r = await (await fetch('/env')).json();
+        if (r.status !== 'ok') {
+          const el = document.getElementById('env');
+          el.style.display = 'block';
+          el.textContent = '⚠️ 环境异常：' + r.status;
+        }
+      } catch (e) { /* 忽略 */ }
+    })();
+
+    const $ = id => document.getElementById(id);
+
+    async function uploadFile() {
+      const f = $('file').files[0];
+      if (!f) { alert('请先选择文件'); return; }
+      const prog = $('progress');
+      prog.className = '';
+      prog.textContent = '上传中…';
+      $('uploadBtn').disabled = true;
+      $('sendBtn').disabled = true;
+      $('question').disabled = true;
+
+      let fileId;
+      try {
+        const fd = new FormData();
+        fd.append('file', f);
+        const res = await fetch('/upload', { method: 'POST', body: fd });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        fileId = (await res.json()).file_id;
+      } catch (e) {
+        prog.className = 'err';
+        prog.textContent = '❌ 上传失败：' + e.message;
+        $('uploadBtn').disabled = false;
+        return;
+      }
+      currentFile = fileId;
+      history = [];
+
+      const timer = setInterval(async () => {
+        let s;
+        try {
+          s = await (await fetch('/status/' + fileId)).json();
+        } catch (e) { return; }
+        prog.textContent = s.msg || '处理中…';
+        if (s.status === 'done') {
+          clearInterval(timer);
+          prog.className = 'ok';
+          prog.textContent = '✅ ' + s.msg + '，可以提问了';
+          $('sendBtn').disabled = false;
+          $('question').disabled = false;
+          $('uploadBtn').disabled = false;
+          $('chat').innerHTML = '<p class="hint">已就绪，开始提问吧</p>';
+        }
+        if (s.status === 'failed') {
+          clearInterval(timer);
+          prog.className = 'err';
+          prog.textContent = '❌ 处理失败：' + s.msg + '（详见后端 cmd 报错）';
+          $('uploadBtn').disabled = false;
+          $('question').disabled = true;
+        }
+      }, 1200);
+    }
+
+    async function send() {
+      const input = $('question');
+      const q = input.value.trim();
+      if (!q || !currentFile || busy) return;
+
+      input.value = '';
+      const chat = $('chat');
+      const hint = chat.querySelector('.hint');
+      if (hint) hint.remove();
+
+      // 提问
+      const qp = document.createElement('p');
+      qp.className = 'q';
+      qp.textContent = '🧑 ' + q;
+      chat.appendChild(qp);
+
+      const ap = document.createElement('p');
+      ap.className = 'a';
+      ap.textContent = '⏳ 检索资料…';
+      chat.appendChild(ap);
+      const scroll = () => { chat.scrollTop = chat.scrollHeight; };
+      scroll();
+
+      busy = true;
+      aborter = new AbortController();
+      $('sendBtn').disabled = true;
+      $('question').disabled = true;
+
+      let answer = '';
+      let errored = false;
+      const setText = t => { ap.textContent = t; scroll(); };
+
+      try {
+        const res = await fetch('/ask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            file_id: currentFile,
+            text: q,
+            history: history.slice(-2),
+          }),
+          signal: aborter.signal,
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + res.statusText);
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        let gotText = false;
+
+        // 空行也要保留（段落分隔）；但正文开始前的空行不能清掉"检索中"占位提示
+        const commit = line => {
+          if (line !== '') gotText = true;
+          if (gotText) { answer += line + '\n'; setText(answer); }
+        };
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+
+          // 逐行拆：@@ 开头是控制帧，其余是正文
+          let nl;
+          while ((nl = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, nl);
+            buf = buf.slice(nl + 1);
+
+            if (line.startsWith('@@')) {
+              let meta;
+              try { meta = JSON.parse(line.slice(2)); } catch (e) { continue; }
+              if (meta.error) errored = true;
+              handleMeta(meta, ap, chat, scroll);
+              continue;
+            }
+            commit(line);
+          }
+          // 尚未成行的残留先当预览渲染，保证真正的逐字输出
+          if (buf && !buf.startsWith('@@')) { gotText = true; setText(answer + buf); }
+        }
+        if (buf && !buf.startsWith('@@')) commit(buf);
+
+        if (answer) {
+          setText(answer);
+        } else if (!errored) {
+          // 后端跑完却一个字都没有 —— 这种情况旧版会静默卡死
+          ap.className = 'a err';
+          ap.textContent = '⚠️ 模型没有返回任何内容。'
+            + '多半是思考型模型的 think 未被正确关闭，请查看后端 cmd 输出。';
+        }
+      } catch (e) {
+        if (e.name === 'AbortError') {
+          setText(answer + '\n\n[已手动停止]');
+        } else {
+          ap.className = 'a err';
+          ap.textContent = '❌ 请求出错：' + e.message;
+        }
+      } finally {
+        busy = false;
+        aborter = null;
+        $('sendBtn').disabled = false;
+        $('question').disabled = false;
+        $('question').focus();
+        if (answer) {
+          history.push({ q, a: answer });
+          if (history.length > 4) history.shift();
+        }
+      }
+    }
+
+    function handleMeta(meta, ap, chat, scroll) {
+      if (meta.status === 'retrieving') {
+        ap.textContent = '⏳ 检索资料…';
+      } else if (meta.status === 'thinking') {
+        ap.textContent = '🧠 模型正在思考（think 未关闭）…';
+      } else if (meta.refs) {
+        const rp = document.createElement('p');
+        rp.className = 'refs';
+        rp.textContent = '📚 引用：' + (meta.refs.length ? meta.refs.join(' · ') : '（无章节信息）')
+          + '　召回 ' + meta.hits + ' 块 · 用时 ' + meta.t_retrieve + 's';
+        chat.insertBefore(rp, ap);
+        scroll();
+      } else if (meta.error) {
+        ap.className = 'a err';
+        const cur = (ap.textContent || '').trim();
+        const isPlaceholder = !cur || cur.startsWith('⏳') || cur.startsWith('🧠');
+        ap.textContent = (isPlaceholder ? '' : cur + '\n\n') + '❌ ' + meta.error;
+        scroll();
+      } else if (meta.done) {
+        const sp = document.createElement('p');
+        sp.className = 'stat';
+        sp.textContent = '✓ ' + meta.chars + ' 字 / ' + meta.seconds + 's';
+        chat.appendChild(sp);
+        scroll();
+      }
+    }
+
+    function clearChat() {
+      history = [];
+      $('chat').innerHTML = '<p class="hint">已就绪，开始提问吧</p>';
+    }
+  </script>
+</body>
+</html>

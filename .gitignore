@@ -1,0 +1,33 @@
+# ---- 文档与向量库：体积大、且含版权教材，不入库 ----
+data/
+旧版备份/
+
+# ---- 兜底：禁止提交任何 PDF（如需入库某个样例，用 git add -f xxx.pdf 强制）----
+*.pdf
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.python-version
+
+# ---- 本地数据库 / 缓存 ----
+*.db
+*.sqlite3
+*.bin
+.cache/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 临时排查文件 ----
+_diag*.txt
+_probe*.py
